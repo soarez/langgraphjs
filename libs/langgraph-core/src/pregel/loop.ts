@@ -1257,14 +1257,6 @@ export class PregelLoop {
       this.status = "done";
       return false;
     }
-    // Cooperative drain: the previous superstep's writes have been applied
-    // and checkpointed above, and the next tasks have been prepared. If a
-    // drain was requested and tasks remain, stop here (without dispatching
-    // them) so the run can be resumed later from the saved checkpoint.
-    if (this.control != null && this.control.drainRequested) {
-      this.status = "draining";
-      return false;
-    }
     // if there are pending writes from a previous loop, apply them
     if (this.skipDoneTasks && this.checkpointPendingWrites.length > 0) {
       this._reapplyWritesToSucceededNodes(this.tasks);
@@ -1290,6 +1282,17 @@ export class PregelLoop {
     if (shouldInterrupt(this.checkpoint, this.interruptBefore, taskList)) {
       this.status = "interrupt_before";
       throw new GraphInterrupt();
+    }
+
+    // Cooperative drain: the previous superstep's writes have been applied
+    // and checkpointed above, and the next tasks have been prepared. If a
+    // drain was requested and tasks remain, stop here (without dispatching
+    // them) so the run can be resumed later from the saved checkpoint. This
+    // comes after the breakpoint check: a resume passes the next step's
+    // breakpoints, so draining in front of one would skip it.
+    if (this.control != null && this.control.drainRequested) {
+      this.status = "draining";
+      return false;
     }
 
     if (this.stream.modes.has("tasks") || this.stream.modes.has("debug")) {

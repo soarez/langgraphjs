@@ -388,6 +388,80 @@ describe("Graph draining", () => {
   });
 });
 
+describe("Draining before an interruptBefore breakpoint", () => {
+  // A resume passes the next step's breakpoints, so a drain right before a
+  // breakpoint must stop there instead, or the resumed run skips it.
+  const buildGraph = () => {
+    let secondRuns = 0;
+    const builder = new StateGraph(State)
+      .addNode("stepA", (_state, runtime: LangGraphRunnableConfig) => {
+        runtime.control?.requestDrain("rollout");
+        return { first: "done" };
+      })
+      .addNode("stepB", () => {
+        secondRuns += 1;
+        return { second: "done" };
+      })
+      .addEdge(START, "stepA")
+      .addEdge("stepA", "stepB")
+      .addEdge("stepB", END);
+    return { builder, secondRuns: () => secondRuns };
+  };
+
+  it.each([
+    ["compile-time", true],
+    ["per-run", false],
+  ])("stops at a %s breakpoint", async (_name, atCompile) => {
+    const { builder, secondRuns } = buildGraph();
+    const graph = builder.compile({
+      checkpointer: new MemorySaver(),
+      interruptBefore: atCompile ? ["stepB"] : undefined,
+    });
+    const config = {
+      configurable: { thread_id: "drain-breakpoint" },
+      interruptBefore: atCompile ? undefined : ["stepB" as const],
+    };
+
+    expect(
+      await graph.invoke({}, { ...config, control: new RunControl() })
+    ).toEqual({ first: "done", __interrupt__: [] });
+    expect((await graph.getState(config)).next).toEqual(["stepB"]);
+    expect(secondRuns()).toBe(0);
+
+    expect(await graph.invoke(null, config)).toEqual({
+      first: "done",
+      second: "done",
+    });
+    expect(secondRuns()).toBe(1);
+  });
+
+  it("stops at a breakpoint inside a subgraph", async () => {
+    const { builder, secondRuns } = buildGraph();
+    const parent = new StateGraph(State)
+      .addNode("child", builder.compile({ interruptBefore: ["stepB"] }))
+      .addEdge(START, "child")
+      .addEdge("child", END)
+      .compile({ checkpointer: new MemorySaver() });
+    const config = { configurable: { thread_id: "drain-sub-breakpoint" } };
+
+    expect(
+      await parent.invoke({}, { ...config, control: new RunControl() })
+    ).toEqual({ __interrupt__: [] });
+    const state = await parent.getState(config, { subgraphs: true });
+    expect(state.next).toEqual(["child"]);
+    expect(
+      (state.tasks[0].state as { next: string[] } | undefined)?.next
+    ).toEqual(["stepB"]);
+    expect(secondRuns()).toBe(0);
+
+    expect(await parent.invoke(null, config)).toEqual({
+      first: "done",
+      second: "done",
+    });
+    expect(secondRuns()).toBe(1);
+  });
+});
+
 describe("Functional API draining", () => {
   it("in-flight task futures still resolve after requestDrain()", async () => {
     const checkpointer = new MemorySaver();
